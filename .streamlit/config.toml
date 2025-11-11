@@ -1,0 +1,7 @@
+[server]
+maxUploadSize = 200
+runOnSave = true
+headless = true
+
+[client]
+toolbarMode = "minimal"
