@@ -90,14 +90,27 @@ def crop_roi(frame, box, rel):
     return frame[ry1:ry2, rx1:rx2].copy()
 
 def tail_wag_features(prev_tail_gray, tail_gray):
-    if prev_tail_gray is None or tail_gray is None: return None
-    diff = cv2.absdiff(tail_gray, prev_tail_gray)
-    mag = float(np.mean(diff))  # swing magnitude proxy
+    """尾巴 ROI 光流近似特征（增加防错机制）"""
+    # 检查输入有效性
+    if prev_tail_gray is None or tail_gray is None:
+        return None
+    if not isinstance(prev_tail_gray, np.ndarray) or not isinstance(tail_gray, np.ndarray):
+        return None
+    if prev_tail_gray.shape != tail_gray.shape:
+        try:
+            tail_gray = cv2.resize(tail_gray, (prev_tail_gray.shape[1], prev_tail_gray.shape[0]))
+        except Exception:
+            return None
+    try:
+        diff = cv2.absdiff(tail_gray, prev_tail_gray)
+    except Exception:
+        return None
+
+    mag = float(np.mean(diff))  # 摆动强度近似
     gx = cv2.Sobel(tail_gray, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(tail_gray, cv2.CV_32F, 0, 1, ksize=3)
-    ori_ratio = float(np.mean(np.abs(gx))) / (np.mean(np.abs(gy)) + 1e-6)  # >1 ~ horizontal
+    ori_ratio = float(np.mean(np.abs(gx))) / (np.mean(np.abs(gy)) + 1e-6)
     return {"wag_mag": mag, "wag_orient": ori_ratio}
-
 def head_micro_features(head_bgr):
     if head_bgr is None: return None
     img = cv2.resize(head_bgr, (128, 128))
