@@ -1,8 +1,13 @@
+# Streamlit Cloud / Py3.11 稳定版（CPU）
 streamlit>=1.38
 numpy==1.26.4
-scikit-learn==1.3.2
-opencv-python-headless==4.10.0.84
-ultralytics==8.3.0
+
+# 🔧 关键：固定到无 GUI 的 headless 版，且用 4.8.1.78 这版最兼容
+opencv-python-headless==4.8.1.78
+
+# YOLO + PyTorch（CPU 版）
+ultralytics==8.2.103
 torch==2.2.2
 torchvision==0.17.2
+
 joblib==1.3.2
