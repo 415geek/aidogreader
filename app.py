@@ -9,7 +9,12 @@ from typing import List, Tuple, Dict, Any
 
 import numpy as np
 import streamlit as st
-import cv2
+try:
+    import cv2
+except Exception as e:
+    cv2 = Noneif cv2 is None:
+    st.error("OpenCV 未正确加载。请确认 requirements.txt 使用 opencv-python-headless==4.8.1.78，并在 Streamlit Cloud 上 Reboot（必要时 Clear cache 后再 Reboot）。")
+    st.stop()    
 from ultralytics import YOLO
 from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
