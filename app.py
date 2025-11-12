@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-# Dog Behavior & Affect Analyzer — Cloud-safe version
-# - cv2 安全导入（OpenCV 装不上也会给出清晰提示）
-# - sklearn / 音频 可选（未安装时自动降级到规则推断，页面不报错）
-# - YOLOv8n 检测 + 简单时序特征 + 主动学习闭环（若 sklearn 可用）
+# Dog Behavior & Affect Analyzer — Cloud-safe, with Simple/Pro sidebar
+# - OpenCV 安全导入；ultralytics YOLOv8n 推理
+# - sklearn / 音频 为可选（未安装时自动降级到规则推断，无报错）
+# - 简洁模式：场景预设 + “速度↔准确度”一键映射；高级模式：原始参数全开放
+# - 主动学习：低置信度片段人工纠正→保存样本→侧栏一键训练（若 sklearn 可用）
 
 import os, json, time, uuid, math, tempfile
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from typing import List, Tuple, Optional
 import numpy as np
 import streamlit as st
 
-# ---- 安全导入 OpenCV（关键：避免白屏） ----
+# ---- 安全导入 OpenCV（避免白屏）----
 try:
     import cv2
 except Exception as e:
@@ -68,7 +69,7 @@ def iou(a, b):
     return inter / (areaA + areaB - inter + 1e-6)
 
 def rule_behavior(speed_px: float, aspect_ratio: float, area_change: float) -> Tuple[str, float]:
-    # 速度主导 + 形态修正
+    # 速度主导 + 形态修正（轻量启发式）
     if speed_px < 2.0:
         if aspect_ratio < 0.85 and area_change < 0.01:
             return "lying", 0.70
@@ -82,7 +83,6 @@ def rule_behavior(speed_px: float, aspect_ratio: float, area_change: float) -> T
 
 def affect_from_behavior(label: str, bark: bool) -> Tuple[float, float, float]:
     a, v = AFFECT_TABLE.get(label, (0.5, 0.5))
-    # 当前禁用音频；仅按行为映射一个保守置信度
     conf_aff = 0.45 if label in ["lying","sitting/idle"] else 0.55
     return a, v, conf_aff
 
@@ -110,7 +110,6 @@ def load_samples(limit: Optional[int] = None):
     return np.vstack(Xs), np.array(ys, dtype=np.int64)
 
 def fit_or_partial_update(X_train: np.ndarray, y_train: np.ndarray):
-    """若 sklearn 可用：训练并做温度校准；保存 latest + 带时间戳版本。"""
     if not SK_OK:
         return None, None, None
     scaler = StandardScaler(with_mean=True, with_std=True)
@@ -147,53 +146,85 @@ def predict_with_model(features_vec: np.ndarray):
 # ---- 模型加载 ----
 @st.cache_resource
 def load_detector():
-    return YOLO("yolov8n.pt")  # 首次自动拉权重
+    return YOLO("yolov8n.pt")  # 首次自动下载权重
 
-# ---- UI ----
+# ---- 页面 ----
 st.set_page_config(page_title=APP_TITLE, layout="centered")
 st.title(APP_TITLE)
 
-# OpenCV 未加载的明确提示（避免一上来报红栈）
+# OpenCV 检测
 if cv2 is None:
     st.error(
         "OpenCV 未正确加载。\n\n"
-        "请确认 `requirements.txt` 使用 `opencv-python-headless==4.8.1.78`，\n"
+        "请确认 `requirements.txt` 使用 `opencv-python-headless==4.8.1.78`，"
         "并在 Streamlit Cloud 的 **Settings → Advanced → Clear cache** 后 **Reboot**。"
     )
     if CV2_IMPORT_ERR:
         st.caption(f"导入异常：{repr(CV2_IMPORT_ERR)}")
     st.stop()
 
-st.caption("上传短视频，进行狗的行为与情绪（唤醒/效价）推断。当前为 Cloud 安全版：音频分支关闭；增量学习在检测到 sklearn 可用时自动启用。")
-
+# ---- 侧栏：简洁/高级模式 ----
 with st.sidebar:
-    st.header("参数")
-    max_seconds = st.slider("分析时长上限(秒)", 5, 90, 25)
-    conf_th = st.slider("检测置信度阈值（YOLO）", 0.1, 0.8, 0.35)
-    sample_fps = st.slider("分析抽帧速率(fps)", 3, 12, 6)
-    lowconf_th = st.slider("低置信度阈值（触发标注）", 0.50, 0.90, 0.65)
-    st.markdown("---")
-    if SK_OK:
-        if st.button("🧠 使用已标注样本改进模型"):
-            X_all, y_all = load_samples()
-            if X_all is None:
-                st.warning("暂无标注样本。先在下方时间轴中保存几条训练样本。")
-            else:
-                _, _, tag = fit_or_partial_update(X_all, y_all)
-                st.success(f"模型已更新 ✅（版本 {tag}）")
-    else:
-        st.info("增量学习暂未启用（sklearn 未安装）。应用仍可用。")
+    st.header("设置")
+    pro_mode = st.toggle("高级模式（面向专业用户）", value=False)
 
+    PRESETS = {
+        "家庭室内（普通）":       {"conf_th": 0.35, "sample_fps": 6,  "max_seconds": 25},
+        "家庭院子/户外（光线足）": {"conf_th": 0.30, "sample_fps": 6,  "max_seconds": 25},
+        "弱光/模糊（更稳）":       {"conf_th": 0.45, "sample_fps": 5,  "max_seconds": 30},
+        "运动多（更快）":         {"conf_th": 0.35, "sample_fps": 8,  "max_seconds": 20},
+    }
+
+    if not pro_mode:
+        preset = st.selectbox("场景预设", list(PRESETS.keys()), index=0,
+                              help="选择最接近你视频拍摄环境的预设。")
+        speed_vs_acc = st.slider("速度 ↔ 准确度", 0, 10, 6,
+                                 help="向左更快，向右更准。一般 5–7 即可。")
+        base = PRESETS[preset]
+        conf_th   = float(np.clip(base["conf_th"] + (5 - speed_vs_acc) * 0.01, 0.20, 0.55))
+        sample_fps = int(np.clip(base["sample_fps"] + (speed_vs_acc - 5) * 0.5, 3, 12))
+        max_seconds = int(np.clip(base["max_seconds"] + (5 - speed_vs_acc) * 1.5, 10, 60))
+        lowconf_th = 0.65
+        st.caption(f"当前策略：阈值≈{conf_th:.2f}，抽帧≈{sample_fps} fps，最长分析 {max_seconds}s。")
+    else:
+        max_seconds = st.slider("分析时长上限(秒)", 5, 120, 25,
+                                help="只分析前 N 秒可提升速度。")
+        conf_th = st.slider("检测置信度阈值（YOLO）", 0.1, 0.9, 0.35,
+                            help="越高越少误检，但可能漏检。")
+        sample_fps = st.slider("分析抽帧速率(fps)", 3, 24, 6,
+                               help="分析用的每秒帧数，越高越准但越慢。")
+        lowconf_th = st.slider("低置信度阈值（触发标注）", 0.50, 0.90, 0.65,
+                               help="低于该值的片段会进入‘需要人工纠正’区域。")
+        if SK_OK:
+            st.markdown("---")
+            if st.button("🧠 使用已标注样本改进模型"):
+                X_all, y_all = load_samples()
+                if X_all is None:
+                    st.warning("暂无标注样本。先在下方时间轴中保存几条训练样本。")
+                else:
+                    _, _, tag = fit_or_partial_update(X_all, y_all)
+                    st.success(f"模型已更新 ✅（版本 {tag}）")
+        else:
+            st.info("增量学习暂未启用（sklearn 未安装）。应用仍可用。")
+
+# ---- 主区：上传与分析 ----
+st.caption("上传短视频，进行狗的行为与情绪（唤醒/效价）推断。当前为 Cloud 安全版：音频分支关闭；sklearn 安装后会自动启用增量学习。")
 uploaded = st.file_uploader("上传视频 (mp4/mov/mkv)", type=["mp4","mov","mkv"])
 
 if uploaded:
-    # 保存到临时文件
+    # 临时保存
     tmpf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tmpf.write(uploaded.read()); tmpf.close()
 
     det = load_detector()
     cap = cv2.VideoCapture(tmpf.name)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+
+    # 读取原始 fps，过低时自动降低 sample_fps 上限，避免卡顿
+    raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    if raw_fps < 20:
+        sample_fps = min(sample_fps, 6)
+
+    fps = raw_fps or 30
     total_frames = int(min(cap.get(cv2.CAP_PROP_FRAME_COUNT) or fps*max_seconds, max_seconds*fps))
     step = max(1, int(round(fps / sample_fps)))
     W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -338,4 +369,4 @@ if uploaded:
         st.success(f"已导出：{path}")
 
 st.markdown("---")
-st.caption("当前为 Cloud 安全版：OpenCV 已 headless，音频关闭；当 `sklearn` 安装成功后，无需改代码即可启用增量学习。")
+st.caption("当前为 Cloud 安全版：OpenCV 为 headless，音频关闭；当 `scikit-learn` 安装成功后，无需改代码即可启用增量学习。")
